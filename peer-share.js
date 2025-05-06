@@ -1,16 +1,16 @@
 import net from "net";
 
-const users = new Map();
+const users = new Set();
 
 net.createServer((socket) => {
-    console.log(socket.localAddress);
+    const id = `${socket.remoteAddress}:${socket.remotePort}`;
+    users.add(id);
 
-    socket.on("data", data => {
+    socket.write(JSON.stringify([...users]));
 
-        // const out = JSON.parse(data.toString("utf-8"));
-
-        // if (out.fn == "") {
-
-        // }
+    socket.on("end", () => {
+        users.delete(id);
     });
-}).listen(22668);
+}).listen(22668, () => {
+    console.log("Server listening on port 22668");
+});
