@@ -1,86 +1,82 @@
 const dgram = require('dgram');
-const net = require('net');
 const readline = require('readline');
 
-const CENTRAL_SERVER = { host: '127.0.0.1', port: 9000 };
+const PEER_PORT = parseInt(process.argv[2]) || 10000;
+const BOOTSTRAP_NODES = [
+    { ip: '127.0.0.1', port: 10000 }, // add more known nodes here
+];
 
-const PEER_ID = process.argv[2];
-const UDP_PORT = parseInt(process.argv[3]);
+const knownPeers = new Map(); // key: ip:port, value: {ip, port}
+const socket = dgram.createSocket('udp4');
 
-if (!PEER_ID || !UDP_PORT) {
-    console.error('Usage: node peer.js <id> <udp_port>');
-    process.exit(1);
-}
+// Handle incoming messages
+socket.on('message', (msg, rinfo) => {
+    const data = msg.toString();
+    const [cmd, payload] = data.split(':');
 
-// UDP socket for messages
-const udpSocket = dgram.createSocket('udp4');
+    const peerKey = `${rinfo.address}:${rinfo.port}`;
+    if (!knownPeers.has(peerKey)) {
+        knownPeers.set(peerKey, { ip: rinfo.address, port: rinfo.port });
+    }
 
-udpSocket.on('message', (msg, rinfo) => {
-    console.log(`[UDP] From ${rinfo.address}:${rinfo.port}: ${msg.toString()}`);
-});
+    if (cmd === 'HELLO') {
+        console.log(`Received HELLO from ${peerKey}`);
+        // Send our peer list back
+        sendPeers(rinfo.address, rinfo.port);
+    }
 
-udpSocket.bind(UDP_PORT, () => {
-    const ip = udpSocket.address().address;
-    register(ip);
-});
-
-// Register to central server
-function register(ip) {
-    const client = net.createConnection(CENTRAL_SERVER, () => {
-        client.write(`REGISTER ${PEER_ID} ${ip} ${UDP_PORT}\n`);
-    });
-    client.on('data', data => {
-        console.log(`[Central] ${data.toString().trim()}`);
-        client.end();
-    });
-}
-
-function unregister() {
-    const client = net.createConnection(CENTRAL_SERVER, () => {
-        client.write(`UNREGISTER ${PEER_ID}\n`);
-    });
-    client.on('data', data => {
-        console.log(`[Central] ${data.toString().trim()}`);
-        client.end();
-        process.exit(0);
-    });
-}
-
-function getPeer(targetId, callback) {
-    const client = net.createConnection(CENTRAL_SERVER, () => {
-        client.write(`GET ${PEER_ID} ${targetId}\n`);
-    });
-    client.on('data', data => {
-        const resp = data.toString().trim();
-        client.end();
-        if (resp === 'NOT_FOUND') {
-            console.log('Peer not found.');
-        } else {
-            const [ip, port] = resp.split(' ');
-            callback(ip, parseInt(port));
+    if (cmd === 'PEERS') {
+        const peers = payload.split(',');
+        for (const peer of peers) {
+            if (peer && peer !== `127.0.0.1:${PEER_PORT}` && !knownPeers.has(peer)) {
+                const [ip, port] = peer.split(':');
+                knownPeers.set(peer, { ip, port: parseInt(port) });
+            }
         }
-    });
+    }
+
+    if (cmd === 'MSG') {
+        console.log(`[Message] ${rinfo.address}:${rinfo.port} says: ${payload}`);
+    }
+});
+
+function sendHello(ip, port) {
+    const msg = Buffer.from(`HELLO:`);
+    socket.send(msg, port, ip);
 }
+
+function sendPeers(ip, port) {
+    const list = Array.from(knownPeers.keys()).join(',');
+    const msg = Buffer.from(`PEERS:${list}`);
+    socket.send(msg, port, ip);
+}
+
+function broadcastMessage(text) {
+    const msg = Buffer.from(`MSG:${text}`);
+    for (const { ip, port } of knownPeers.values()) {
+        socket.send(msg, port, ip);
+    }
+}
+
+// Start listening
+socket.bind(PEER_PORT, () => {
+    console.log(`Peer listening on port ${PEER_PORT}`);
+    for (const peer of BOOTSTRAP_NODES) {
+        if (peer.port !== PEER_PORT) {
+            sendHello(peer.ip, peer.port);
+        }
+    }
+});
 
 // CLI input
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: `${PEER_ID}> `
+    prompt: `You> `
 });
 
 rl.prompt();
 rl.on('line', line => {
-    const [cmd, arg1, ...rest] = line.trim().split(' ');
-    if (cmd === 'exit') {
-        unregister();
-    } else if (cmd === 'send' && arg1 && rest.length > 0) {
-        const message = rest.join(' ');
-        getPeer(arg1, (ip, port) => {
-            udpSocket.send(message, port, ip);
-        });
-    } else {
-        console.log('Commands: send <peerId> <message>, exit');
-    }
+    broadcastMessage(line.trim());
     rl.prompt();
 });
